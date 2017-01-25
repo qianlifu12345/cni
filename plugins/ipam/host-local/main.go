@@ -28,6 +28,7 @@ func main() {
 }
 
 func cmdAdd(args *skel.CmdArgs) error {
+	allocator.RestserviceURL = "http://localhost:8075"	
 	ipamConf, err := allocator.LoadIPAMConfig(args.StdinData, args.Args)
 	if err != nil {
 		return err

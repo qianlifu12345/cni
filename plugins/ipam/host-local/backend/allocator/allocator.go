@@ -15,13 +15,18 @@
 package allocator
 
 import (
+	"bytes"
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"log"
 	"net"
+	"net/http"
 
 	"github.com/containernetworking/cni/pkg/ip"
 	"github.com/containernetworking/cni/pkg/types"
 	"github.com/containernetworking/cni/plugins/ipam/host-local/backend"
+	"github.com/vishvananda/netlink"
 )
 
 type IPAllocator struct {
@@ -32,6 +37,14 @@ type IPAllocator struct {
 	conf  *IPAMConfig
 	store backend.Store
 }
+
+type IpAddresss struct {
+	IP      string `json:"ip"`
+	Gateway string `json:"gateway"`
+}
+
+//RestserviceURL provide restful service
+var RestserviceURL string
 
 func NewIPAllocator(conf *IPAMConfig, store backend.Store) (*IPAllocator, error) {
 	// Can't create an allocator for a network with no addresses, eg
@@ -130,72 +143,45 @@ func validateRangeIP(ip net.IP, ipnet *net.IPNet, start net.IP, end net.IP) erro
 
 // Returns newly allocated IP along with its config
 func (a *IPAllocator) Get(id string) (*types.IPConfig, error) {
-	a.store.Lock()
-	defer a.store.Unlock()
 
-	gw := a.conf.Gateway
-	if gw == nil {
-		gw = ip.NextIP(a.conf.Subnet.IP)
+	var ipresult types.IPConfig
+	var ip IpAddresss
+	ip.Gateway = ""
+	ip.IP = ""
+	client := &http.Client{}
+	var jsonprep = `{"subnet": "172.22.101.0/24"}`
+	var jsonStr = []byte(jsonprep)
+
+	req, err := http.NewRequest("POST","http://localhost:8075/ip" , bytes.NewBuffer(jsonStr))
+	req.Header.Add("Accept", "application/json")
+	resp, err := client.Do(req)
+	if err != nil {
+		return &ipresult, err
 	}
 
-	var requestedIP net.IP
-	if a.conf.Args != nil {
-		requestedIP = a.conf.Args.IP
+	if resp.StatusCode != 200 {
+		return &ipresult, fmt.Errorf("Error %v accessing /ip path", resp.StatusCode)
 	}
 
-	if requestedIP != nil {
-		if gw != nil && gw.Equal(a.conf.Args.IP) {
-			return nil, fmt.Errorf("requested IP must differ gateway IP")
-		}
-
-		subnet := net.IPNet{
-			IP:   a.conf.Subnet.IP,
-			Mask: a.conf.Subnet.Mask,
-		}
-		err := validateRangeIP(requestedIP, &subnet, a.start, a.end)
-		if err != nil {
-			return nil, err
-		}
-
-		reserved, err := a.store.Reserve(id, requestedIP)
-		if err != nil {
-			return nil, err
-		}
-
-		if reserved {
-			return &types.IPConfig{
-				IP:      net.IPNet{IP: requestedIP, Mask: a.conf.Subnet.Mask},
-				Gateway: gw,
-				Routes:  a.conf.Routes,
-			}, nil
-		}
-		return nil, fmt.Errorf("requested IP address %q is not available in network: %s", requestedIP, a.conf.Name)
+	defer resp.Body.Close()
+	body, err := ioutil.ReadAll(resp.Body)
+	if err != nil {
+		return &ipresult, err
 	}
 
-	startIP, endIP := a.getSearchRange()
-	for cur := startIP; ; cur = a.nextIP(cur) {
-		// don't allocate gateway IP
-		if gw != nil && cur.Equal(gw) {
-			continue
-		}
-
-		reserved, err := a.store.Reserve(id, cur)
-		if err != nil {
-			return nil, err
-		}
-		if reserved {
-			return &types.IPConfig{
-				IP:      net.IPNet{IP: cur, Mask: a.conf.Subnet.Mask},
-				Gateway: gw,
-				Routes:  a.conf.Routes,
-			}, nil
-		}
-		// break here to complete the loop
-		if cur.Equal(endIP) {
-			break
-		}
+	err = json.Unmarshal(body, &ip)
+	if err != nil {
+		return &ipresult, fmt.Errorf("Error unmarshal the json from restful api %v ", err)
 	}
-	return nil, fmt.Errorf("no IP addresses available in network: %s", a.conf.Name)
+
+        tmp,err:=netlink.ParseIPNet(ip.IP+"/24")
+	if err != nil {
+		return &ipresult, fmt.Errorf("Error convert ip address to ip object %v ", err)
+	}
+	ipresult.IP=*tmp
+
+	return &ipresult, nil
+
 }
 
 // Releases all IPs allocated for the container with given ID
